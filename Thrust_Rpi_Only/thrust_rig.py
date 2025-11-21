@@ -1,6 +1,5 @@
 # thrust_rig_monitor.py
 # ideaForge Thrust Rig Monitoring System — FINAL CLEAN VERSION
-# ESC Temp now under Motor Temp (exactly as you want)
 
 import curses
 import time
@@ -255,3 +254,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
