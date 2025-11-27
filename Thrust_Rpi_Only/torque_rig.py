@@ -1,7 +1,7 @@
 # torque_rig_monitor.py
-# ideaForge Torque Rig Monitoring System — FINAL VERSION
-# Now measures TORQUE (Nm) instead of Thrust (N)
-# Torque = Total Weight (kg) × 9.81 × 0.23 m
+# ideaForge Torque Rig Monitoring System — FINAL VERSION with Commanded RPM
+# Measures TORQUE (Nm) = Total Weight (kg) × 9.81 × 0.23 m
+# Added Commanded RPM from ESC (register 0x31)
 
 import curses
 import time
@@ -27,6 +27,7 @@ TEMP_REGISTER = 0x49
 VDC_REGISTER = 0xEB
 VOUT_VXXX = 0x8A
 IGBT_TEMP = 0x4A
+RPM_COMMAND_REGISTER = 0x31  # ← Added for commanded RPM
 
 NOMINAL_RPM = 6000
 CAN_CYCLIC_RATE = 0x3C
@@ -95,6 +96,12 @@ def can_worker():
                         data_queue.put(('Vout', round(raw / 4096 * vdc / sqrt(2) * 0.92, 2)))
                     elif reg == IGBT_TEMP:
                         data_queue.put(('ESC_Temp', round(6e-8 * raw**2 + 0.0032 * raw - 23.236)))
+                elif aid == BAMOCAR_ID and len(d) >= 3:
+                    # Commanded RPM check
+                    if d[0] == RPM_COMMAND_REGISTER:
+                        raw_cmd = (d[2] << 8) | d[1]
+                        if raw_cmd > 32767: raw_cmd -= 65536
+                        data_queue.put(('RPM_Cmd', round(raw_cmd * NOMINAL_RPM / 32767, 1)))
                 elif aid == BATTERY_ID and len(d) == 8:
                     b = ''.join(f'{x:08b}' for x in d)
                     v1 = int(b[0:14], 2) * 0.1
@@ -120,14 +127,14 @@ def curses_main(stdscr):
     curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_BLUE)
 
     weights = [0.0] * 4
-    rpm = esc_torque = motor_temp = current = vdc = vout = esc_temp = 0.0
+    rpm = rpm_cmd = esc_torque = motor_temp = current = vdc = vout = esc_temp = 0.0
     batt_v = bus_v = power = 0.0
 
     os.makedirs("logs", exist_ok=True)
     csvfile = open(f"logs/torque_rig_{datetime.now():%Y%m%d_%H%M%S}.csv", "w", newline="")
     writer = csv.writer(csvfile)
     writer.writerow(["Time","T0","T90","T180","T270","Total_kg","Torque_Nm",
-                     "RPM","ESC_Torque_Nm","Motor_Temp_C","ESC_Temp_C","Current_A","Vdc","Vout",
+                     "RPM","Cmd_RPM","ESC_Torque_Nm","Motor_Temp_C","ESC_Temp_C","Current_A","Vdc","Vout",
                      "Batt_V","Bus_V","Power_W"])
 
     while running.is_set():
@@ -149,7 +156,7 @@ def curses_main(stdscr):
 
         # TORQUE MEASUREMENT
         total_kg = sum(weights)
-        torque_nm = total_kg * 9.81 * LEVER_ARM_M  # ← This is your torque!
+        torque_nm = total_kg * 9.81 * LEVER_ARM_M
 
         safe_addstr(stdscr, 5, 4, "TORQUE MEASUREMENT (Lever = 23 cm)", curses.A_BOLD | curses.color_pair(2))
         for i, label in enumerate(LABELS):
@@ -161,18 +168,19 @@ def curses_main(stdscr):
         # ESC & MOTOR STATUS
         safe_addstr(stdscr, 5, 52, "ESC & MOTOR STATUS", curses.A_BOLD | curses.color_pair(2))
         safe_addstr(stdscr, 7, 54, f"RPM          : {rpm:8.1f}")
-        safe_addstr(stdscr, 8, 54, f"ESC Torque   : {esc_torque:8.3f} Nm")
-        safe_addstr(stdscr, 9, 54, f"Motor Temp   : {motor_temp:6.1f} °C")
-        safe_addstr(stdscr, 10, 54, f"ESC Temp     : {esc_temp:6.1f} °C")
-        safe_addstr(stdscr, 11, 54, f"Current      : {current:8.2f} A")
-        safe_addstr(stdscr, 12, 54, f"Vdc          : {vdc:8.2f} V")
-        safe_addstr(stdscr, 13, 54, f"Vout (Phase) : {vout:8.2f} V")
+        safe_addstr(stdscr, 8, 54, f"Cmd RPM      : {rpm_cmd:8.1f}")
+        safe_addstr(stdscr, 9, 54, f"ESC_Torque   : {esc_torque:8.3f} Nm")
+        safe_addstr(stdscr, 10, 54, f"Motor Temp   : {motor_temp:6.1f} °C")
+        safe_addstr(stdscr, 11, 54, f"ESC Temp     : {esc_temp:6.1f} °C")
+        safe_addstr(stdscr, 12, 54, f"Current      : {current:8.2f} A")
+        safe_addstr(stdscr, 13, 54, f"Vdc          : {vdc:8.2f} V")
+        safe_addstr(stdscr, 14, 54, f"Vout (Phase) : {vout:8.2f} V")
 
         # Battery
-        safe_addstr(stdscr, 16, 52, "BATTERY & POWER", curses.A_BOLD | curses.color_pair(2))
-        safe_addstr(stdscr, 18, 54, f"Battery Volt : {batt_v:8.2f} V")
-        safe_addstr(stdscr, 19, 54, f"Bus Voltage  : {bus_v:8.2f} V")
-        safe_addstr(stdscr, 20, 54, f"Power Output : {power:8.1f} W")
+        safe_addstr(stdscr, 17, 52, "BATTERY & POWER", curses.A_BOLD | curses.color_pair(2))
+        safe_addstr(stdscr, 19, 54, f"Battery Volt : {batt_v:8.2f} V")
+        safe_addstr(stdscr, 20, 54, f"Bus Voltage  : {bus_v:8.2f} V")
+        safe_addstr(stdscr, 21, 54, f"Power Output : {power:8.1f} W")
 
         # Status bar
         status = "RUNNING" if rpm > 100 else "STANDBY"
@@ -191,6 +199,7 @@ def curses_main(stdscr):
                 if typ == 'weight':
                     weights[vals[0]] = vals[1]
                 elif typ == 'RPM': rpm = vals[0]
+                elif typ == 'RPM_Cmd': rpm_cmd = vals[0]
                 elif typ == 'ESC_Torque': esc_torque = vals[0]
                 elif typ == 'Motor_Temp': motor_temp = vals[0]
                 elif typ == 'Current': current = vals[0]
@@ -205,7 +214,7 @@ def curses_main(stdscr):
 
         # CSV logging
         row = [datetime.now().strftime("%H:%M:%S.%f")[:-3]] + weights + \
-              [round(total_kg,3), round(torque_nm,3), rpm, esc_torque, motor_temp, esc_temp,
+              [round(total_kg,3), round(torque_nm,3), rpm, rpm_cmd, esc_torque, motor_temp, esc_temp,
                current, vdc, vout, batt_v, bus_v, power]
         writer.writerow(row)
         csvfile.flush()
