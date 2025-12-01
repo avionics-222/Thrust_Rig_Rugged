@@ -1,5 +1,5 @@
 # thrust_rig_monitor.py
-# ideaForge Thrust Rig Monitoring System — FINAL CLEAN VERSION
+# ideaForge Thrust Rig Monitoring System — WITH COMMANDED RPM 
 
 import curses
 import time
@@ -25,13 +25,14 @@ TEMP_REGISTER = 0x49
 VDC_REGISTER = 0xEB
 VOUT_VXXX = 0x8A
 IGBT_TEMP = 0x4A
+RPM_COMMAND_REGISTER = 0x31  # ← Added: Commanded RPM register
 
 NOMINAL_RPM = 6000
 CAN_CYCLIC_RATE = 0x3C
 KT_DEFAULT = 0.88
 
 LOAD_CELL_PINS = [(12,13), (20,21), (6,5), (23,24)]
-OFFSETS = [-152333.5, -2636403.0, -826961.0, 3403535.0]
+OFFSETS = [-152333.5, -2636403.0, -826961.0, -720752.0]
 LABELS = ["Thrust_0Deg", "Thrust_90Deg", "Thrust_180Deg", "Thrust_270Deg"]
 
 data_queue = multiprocessing.Queue()
@@ -92,6 +93,12 @@ def can_worker():
                         data_queue.put(('Vout', round(raw / 4096 * vdc / sqrt(2) * 0.92, 2)))
                     elif reg == IGBT_TEMP:
                         data_queue.put(('ESC_Temp', round(6e-8 * raw**2 + 0.0032 * raw - 23.236)))
+                elif aid == BAMOCAR_ID and len(d) >= 3:
+                    # ← Capture Commanded RPM from outgoing message to ESC
+                    if d[0] == RPM_COMMAND_REGISTER:
+                        raw_cmd = (d[2] << 8) | d[1]
+                        if raw_cmd > 32767: raw_cmd -= 65536
+                        data_queue.put(('RPM_Cmd', round(raw_cmd * NOMINAL_RPM / 32767, 1)))
                 elif aid == BATTERY_ID and len(d) == 8:
                     b = ''.join(f'{x:08b}' for x in d)
                     v1 = int(b[0:14], 2) * 0.1
@@ -111,23 +118,23 @@ def curses_main(stdscr):
     stdscr.timeout(100)
     curses.start_color()
     curses.init_pair(1, curses.COLOR_CYAN, curses.COLOR_BLACK)
-    curses.init_pair(2, curses.COLOR_GREEN, curses.COLOR_BLACK)   # Green for header & thrust
+    curses.init_pair(2, curses.COLOR_GREEN, curses.COLOR_BLACK)
     curses.init_pair(3, curses.COLOR_YELLOW, curses.COLOR_BLACK)
     curses.init_pair(4, curses.COLOR_RED, curses.COLOR_BLACK)
     curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_BLUE)
 
-    # Data
+    # Data variables
     weights = [0.0] * 4
-    rpm = esc_torque = motor_temp = current = vdc = vout = esc_temp = 0.0
+    rpm = rpm_cmd = esc_torque = motor_temp = current = vdc = vout = esc_temp = 0.0
     batt_v = bus_v = power = 0.0
 
-    # CSV
+    # CSV setup
     os.makedirs("logs", exist_ok=True)
     csvfile = open(f"logs/thrust_rig_{datetime.now():%Y%m%d_%H%M%S}.csv", "w", newline="")
     writer = csv.writer(csvfile)
     writer.writerow(["Time","T0","T90","T180","T270","Total_kg","Thrust_N",
-                     "RPM","ESC_Torque_Nm","Motor_Temp_C","ESC_Temp_C","Current_A","Vdc","Vout",
-                     "Batt_V","Bus_V","Power_W"])
+                     "RPM","Cmd_RPM","ESC_Torque_Nm","Motor_Temp_C","ESC_Temp_C",
+                     "Current_A","Vdc","Vout","Batt_V","Bus_V","Power_W"])
 
     while running.is_set():
         stdscr.erase()
@@ -139,13 +146,11 @@ def curses_main(stdscr):
             time.sleep(0.5)
             continue
 
-        # GREEN HEADER
+        # Header
         title = " ideaForge Thrust Rig Monitoring System "
         safe_addstr(stdscr, 0, 0, title.center(w), curses.A_BOLD | curses.color_pair(2) | curses.A_REVERSE)
-
         subtitle = f"Live • {datetime.now():%Y-%m-%d %H:%M:%S} • Press 'q' to quit"
         safe_addstr(stdscr, 1, 0, subtitle.center(w), curses.color_pair(2))
-
         safe_addstr(stdscr, 3, 0, "─" * w, curses.color_pair(1))
 
         # Thrust
@@ -156,17 +161,18 @@ def curses_main(stdscr):
             safe_addstr(stdscr, 7+i, 6, f"{label:<12}: {weights[i]:8.3f} kg")
         safe_addstr(stdscr, 11, 6, "─" * 35)
         safe_addstr(stdscr, 12, 6, f"TOTAL WEIGHT : {total_kg:8.3f} kg", curses.A_BOLD)
-        safe_addstr(stdscr, 13, 6, f"NET THRUST : {thrust_n:8.2f} N", curses.A_BOLD | curses.color_pair(2))
+        safe_addstr(stdscr, 13, 6, f"NET THRUST   : {thrust_n:8.2f} N", curses.A_BOLD | curses.color_pair(2))
 
-        # ESC & MOTOR STATUS — ESC Temp UNDER Motor Temp
+        # ESC & MOTOR STATUS — Now includes Cmd RPM
         safe_addstr(stdscr, 5, 52, "ESC & MOTOR STATUS", curses.A_BOLD | curses.color_pair(2))
         safe_addstr(stdscr, 7, 54, f"RPM          : {rpm:8.1f}")
-        safe_addstr(stdscr, 8, 54, f"ESC_Torque   : {esc_torque:8.3f} Nm")
-        safe_addstr(stdscr, 9, 54, f"Motor Temp   : {motor_temp:6.1f} °C")
-        safe_addstr(stdscr, 10, 54, f"ESC Temp     : {esc_temp:6.1f} °C")   # ← Now on next line
-        safe_addstr(stdscr, 11, 54, f"Current      : {current:8.2f} A")
-        safe_addstr(stdscr, 12, 54, f"Vdc          : {vdc:8.2f} V")
-        safe_addstr(stdscr, 13, 54, f"Vout (Phase) : {vout:8.2f} V")
+        safe_addstr(stdscr, 8, 54, f"Cmd RPM      : {rpm_cmd:8.1f}")        # ← Added
+        safe_addstr(stdscr, 9, 54, f"ESC_Torque   : {esc_torque:8.3f} Nm")
+        safe_addstr(stdscr, 10, 54, f"Motor Temp   : {motor_temp:6.1f} °C")
+        safe_addstr(stdscr, 11, 54, f"ESC Temp     : {esc_temp:6.1f} °C")
+        safe_addstr(stdscr, 12, 54, f"Current      : {current:8.2f} A")
+        safe_addstr(stdscr, 13, 54, f"Vdc          : {vdc:8.2f} V")
+        safe_addstr(stdscr, 14, 54, f"Vout (Phase) : {vout:8.2f} V")
 
         # Battery
         safe_addstr(stdscr, 16, 52, "BATTERY & POWER", curses.A_BOLD | curses.color_pair(2))
@@ -179,18 +185,19 @@ def curses_main(stdscr):
         safe_addstr(stdscr, h-3, 0, " " * w, curses.A_REVERSE)
         safe_addstr(stdscr, h-3, 4, f" STATUS: {status} ", curses.color_pair(2) | curses.A_BOLD)
 
-        footer = "ideaForge Internal • Thrust Rig v10 • USB-CAN-B • HX711 ×4"
+        footer = "ideaForge Internal • Thrust Rig v10 • USB-CAN-B • HX711 ×4 • Cmd RPM Enabled"
         safe_addstr(stdscr, h-1, 0, footer.center(w), curses.A_DIM)
 
         stdscr.refresh()
 
-        # Update data
+        # Update from queue
         while not data_queue.empty():
             try:
                 typ, *vals = data_queue.get_nowait()
                 if typ == 'weight':
                     weights[vals[0]] = vals[1]
                 elif typ == 'RPM': rpm = vals[0]
+                elif typ == 'RPM_Cmd': rpm_cmd = vals[0]           # ← Added
                 elif typ == 'ESC_Torque': esc_torque = vals[0]
                 elif typ == 'Motor_Temp': motor_temp = vals[0]
                 elif typ == 'Current': current = vals[0]
@@ -203,10 +210,10 @@ def curses_main(stdscr):
             except:
                 pass
 
-        # CSV — Motor_Temp and ESC_Temp still next to each other in columns
+        # CSV logging (Cmd_RPM added)
         row = [datetime.now().strftime("%H:%M:%S.%f")[:-3]] + weights + \
-              [round(total_kg,3), round(thrust_n,2), rpm, esc_torque, motor_temp, esc_temp,
-               current, vdc, vout, batt_v, bus_v, power]
+              [round(total_kg,3), round(thrust_n,2), rpm, rpm_cmd, esc_torque,
+               motor_temp, esc_temp, current, vdc, vout, batt_v, bus_v, power]
         writer.writerow(row)
         csvfile.flush()
 
@@ -216,7 +223,6 @@ def curses_main(stdscr):
 
     csvfile.close()
 
-# Safe addstr
 def safe_addstr(win, y, x, text, attr=0):
     try:
         h, w = win.getmaxyx()
@@ -227,7 +233,7 @@ def safe_addstr(win, y, x, text, attr=0):
 
 # === MAIN ===
 def main():
-    print("Starting ideaForge Thrust Rig Monitoring System...")
+    print("Starting ideaForge Thrust Rig Monitoring System (with Cmd RPM)...")
     p1 = multiprocessing.Process(target=can_worker)
     p1.start()
     procs = [p1]
@@ -254,4 +260,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
