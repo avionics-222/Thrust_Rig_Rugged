@@ -1,4 +1,4 @@
-# rpi1_thrust_transmitter.py
+# AUTO ZERO TARRYING
 # FINAL WORKING + AUTO ZERO/TARE FOR ALL 4 LOADCELLS AT STARTUP
 # NO PRINTS REMOVED, EVERYTHING SAME AS ORIGINAL — ONLY OFFSETS AUTOMATED
 
@@ -242,3 +242,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
